@@ -1,0 +1,6 @@
+array open '['
+string: 'ab€'
+integer: 0
+string: 'z'
+array close ']'
+memory leaks:	0

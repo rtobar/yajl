@@ -91,6 +91,14 @@ struct yajl_lexer_t {
     unsigned int validateUTF8;
 
     yajl_alloc_funcs * alloc;
+
+    /* a string split across chunks resumes at strResumeOff instead of being
+     * re-lexed from its opening quote, which is quadratic in its length with
+     * fixed-size chunks. strResumeOff counts bytes from the opening quote
+     * (position 0), i.e. it is an offset into lexer->buf. */
+    unsigned int strResume;
+    int strHasEscapes;
+    size_t strResumeOff;
 };
 
 #define readChar(lxr, txt, off)                      \
@@ -266,10 +274,16 @@ yajl_string_scan(const unsigned char * buf, size_t len, int utf8check)
 
 static yajl_tok
 yajl_lex_string(yajl_lexer lexer, const unsigned char * jsonText,
-                size_t jsonTextLen, size_t * offset)
+                size_t jsonTextLen, size_t * offset, size_t tokBase,
+                int hasEscapes)
 {
     yajl_tok tok = yajl_tok_error;
-    int hasEscapes = 0;
+    /* token positions: text offset o is token position tokBase + o */
+    size_t charStart = 0;
+    int eofAtCharStart = 1;
+#define TOKPOS() ((lexer->bufInUse && yajl_buf_len(lexer->buf) && \
+                   lexer->bufOff < yajl_buf_len(lexer->buf)) ? \
+                  lexer->bufOff : tokBase + *offset)
 
     for (;;) {
         unsigned char curChar;
@@ -296,8 +310,11 @@ yajl_lex_string(yajl_lexer lexer, const unsigned char * jsonText,
             }
         }
 
+        eofAtCharStart = 1;
         STR_CHECK_EOF;
 
+        charStart = TOKPOS();
+        eofAtCharStart = 0;
         curChar = readChar(lexer, jsonText, offset);
 
         /* quote terminates */
@@ -356,6 +373,15 @@ yajl_lex_string(yajl_lexer lexer, const unsigned char * jsonText,
         /* accept it, and move on */
     }
   finish_string_lex:
+    if (tok == yajl_tok_eof) {
+        lexer->strResume = 1;
+        lexer->strHasEscapes = hasEscapes;
+        /* between chars, resume at the first unprocessed byte (still in the
+         * buffer after an empty feed); mid escape or utf8 sequence, re-read
+         * it from its first byte */
+        lexer->strResumeOff = eofAtCharStart ? TOKPOS() : charStart;
+    }
+#undef TOKPOS
     /* tell our buddy, the parser, wether he needs to process this string
      * again */
     if (hasEscapes && tok == yajl_tok_string) {
@@ -503,9 +529,22 @@ yajl_lex_lex(yajl_lexer lexer, const unsigned char * jsonText,
     yajl_tok tok = yajl_tok_error;
     unsigned char c;
     size_t startOffset = *offset;
+    /* token position of text offset o is tokBase + o. With no buffer in use
+     * this wraps, so that tokBase + o comes out as o - startOffset. */
+    size_t tokBase = (lexer->bufInUse ? yajl_buf_len(lexer->buf) : 0) - startOffset;
 
     *outBuf = NULL;
     *outLen = 0;
+
+    if (lexer->strResume && lexer->bufInUse) {
+        lexer->strResume = 0;
+        lexer->bufOff = lexer->strResumeOff;
+        tok = yajl_lex_string(lexer, (const unsigned char *) jsonText,
+                              jsonTextLen, offset, tokBase,
+                              lexer->strHasEscapes);
+        goto lexed;
+    }
+    lexer->strResume = 0;
 
     for (;;) {
         assert(*offset <= jsonTextLen);
@@ -594,8 +633,10 @@ yajl_lex_lex(yajl_lexer lexer, const unsigned char * jsonText,
                 goto lexed;
             }
             case '"': {
+                /* startOffset may have moved past leading whitespace */
+                tokBase = (lexer->bufInUse ? yajl_buf_len(lexer->buf) : 0) - startOffset;
                 tok = yajl_lex_string(lexer, (const unsigned char *) jsonText,
-                                      jsonTextLen, offset);
+                                      jsonTextLen, offset, tokBase, 0);
                 goto lexed;
             }
             case '-':
@@ -750,6 +791,9 @@ yajl_tok yajl_lex_peek(yajl_lexer lexer, const unsigned char * jsonText,
     size_t bufLen = yajl_buf_len(lexer->buf);
     size_t bufOff = lexer->bufOff;
     unsigned int bufInUse = lexer->bufInUse;
+    unsigned int strResume = lexer->strResume;
+    int strHasEscapes = lexer->strHasEscapes;
+    size_t strResumeOff = lexer->strResumeOff;
     yajl_tok tok;
 
     tok = yajl_lex_lex(lexer, jsonText, jsonTextLen, &offset,
@@ -757,6 +801,9 @@ yajl_tok yajl_lex_peek(yajl_lexer lexer, const unsigned char * jsonText,
 
     lexer->bufOff = bufOff;
     lexer->bufInUse = bufInUse;
+    lexer->strResume = strResume;
+    lexer->strHasEscapes = strHasEscapes;
+    lexer->strResumeOff = strResumeOff;
     yajl_buf_truncate(lexer->buf, bufLen);
 
     return tok;
