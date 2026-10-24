@@ -529,9 +529,7 @@ yajl_lex_lex(yajl_lexer lexer, const unsigned char * jsonText,
     yajl_tok tok = yajl_tok_error;
     unsigned char c;
     size_t startOffset = *offset;
-    /* token position of text offset o is tokBase + o. With no buffer in use
-     * this wraps, so that tokBase + o comes out as o - startOffset. */
-    size_t tokBase = (lexer->bufInUse ? yajl_buf_len(lexer->buf) : 0) - startOffset;
+    size_t tokBase;
 
     *outBuf = NULL;
     *outLen = 0;
@@ -539,6 +537,7 @@ yajl_lex_lex(yajl_lexer lexer, const unsigned char * jsonText,
     if (lexer->strResume && lexer->bufInUse) {
         lexer->strResume = 0;
         lexer->bufOff = lexer->strResumeOff;
+        tokBase = yajl_buf_len(lexer->buf) - startOffset;
         tok = yajl_lex_string(lexer, (const unsigned char *) jsonText,
                               jsonTextLen, offset, tokBase,
                               lexer->strHasEscapes);
@@ -633,7 +632,9 @@ yajl_lex_lex(yajl_lexer lexer, const unsigned char * jsonText,
                 goto lexed;
             }
             case '"': {
-                /* startOffset may have moved past leading whitespace */
+                /* startOffset may have moved past leading whitespace. With no
+                 * buffer in use this wraps, so that tokBase + o comes out as
+                 * o - startOffset. */
                 tokBase = (lexer->bufInUse ? yajl_buf_len(lexer->buf) : 0) - startOffset;
                 tok = yajl_lex_string(lexer, (const unsigned char *) jsonText,
                                       jsonTextLen, offset, tokBase, 0);
